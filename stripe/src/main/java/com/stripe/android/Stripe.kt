@@ -30,11 +30,13 @@ import com.stripe.android.model.Source
 import com.stripe.android.model.SourceParams
 import com.stripe.android.model.StripeFile
 import com.stripe.android.model.StripeFileParams
+import com.stripe.android.model.StripeIntent
 import com.stripe.android.model.Token
 import com.stripe.android.model.TokenParams
 import com.stripe.android.view.AuthActivityStarter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import java.lang.IllegalStateException
 
 /**
  * Entry-point to the Stripe SDK.
@@ -146,6 +148,59 @@ class Stripe internal constructor(
                 stripeAccount = stripeAccountId
             )
         )
+    }
+
+
+    fun confirmAlipayPayment(
+        context: Context,
+        clientSecret: String,
+        returnUrl: String,
+        stripeAccountId: String? = this.stripeAccountId,
+        authenticationHandler: AlipayAuthenticationHandler,
+        callback: ApiResultCallback<PaymentIntentResult>
+    ) {
+        paymentController.startConfirm(
+            ConfirmPaymentIntentParams.createAlipay(context, clientSecret, returnUrl),
+            ApiRequest.Options(
+                apiKey = publishableKey,
+                stripeAccount = stripeAccountId
+            ),
+            object : ApiResultCallback<StripeIntent> {
+                override fun onSuccess(result: StripeIntent) {
+                    val nextActionData = result.nextActionData
+                    if (nextActionData is StripeIntent.NextActionData.RedirectToUrl &&
+                        nextActionData.mobileData is StripeIntent.NextActionData.RedirectToUrl.MobileData.Alipay) {
+                        paymentController.authenticateAlipay(
+                            result,
+                            clientSecret,
+                            stripeAccountId,
+                            authenticationHandler,
+                            callback
+                        )
+                    } else {
+                        // TODO(smaskell): Improve error handling
+                        callback.onError(IllegalStateException("Payment intent had unexpected next action"))
+                    }
+                }
+
+                override fun onError(e: Exception) = callback.onError(e)
+            }
+        )
+    }
+
+    internal class AlipayAuthenticationTask(
+        private val data: String,
+        private val authenticationHandler: AlipayAuthenticationHandler,
+        callback: ApiResultCallback<String>
+    ) : ApiOperation<String>(callback = callback) {
+        override suspend fun getResult(): String? {
+            val result = authenticationHandler.authenticate(data)
+            return result["resultStatus"]
+        }
+    }
+
+    interface AlipayAuthenticationHandler {
+        suspend fun authenticate(data: String): Map<String, String>
     }
 
     /**

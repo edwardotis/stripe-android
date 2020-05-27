@@ -34,6 +34,7 @@ import java.security.cert.CertificateException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import java.lang.IllegalStateException
 
 /**
  * A controller responsible for confirming and authenticating payment (typically through resolving
@@ -82,6 +83,17 @@ internal class StripePaymentController internal constructor(
             ConfirmStripeIntentCallback(
                 host, requestOptions, this, getRequestCode(confirmStripeIntentParams)
             )
+        ).execute()
+    }
+
+    override fun startConfirm(
+        confirmStripeIntentParams: ConfirmStripeIntentParams,
+        requestOptions: ApiRequest.Options,
+        callback: ApiResultCallback<StripeIntent>
+    ) {
+        ConfirmStripeIntentTask(
+            stripeRepository, confirmStripeIntentParams, requestOptions, workScope,
+            callback
         ).execute()
     }
 
@@ -287,6 +299,67 @@ internal class StripePaymentController internal constructor(
         )
 
         stripeRepository.retrieveSource(sourceId, clientSecret, requestOptions, callback)
+    }
+
+    override fun authenticateAlipay(
+        intent: StripeIntent,
+        clientSecret: String,
+        stripeAccountId: String?,
+        authenticationHandler: Stripe.AlipayAuthenticationHandler,
+        callback: ApiResultCallback<PaymentIntentResult>
+    ) {
+        AlipayAuthenticationTask(
+            intent,
+            authenticationHandler,
+            object : ApiResultCallback<String> {
+                override fun onSuccess(result: String) {
+                    when (result) {
+                        "9000" -> {
+                            val requestOptions = ApiRequest.Options(
+                                apiKey = publishableKey,
+                                stripeAccount = stripeAccountId
+                            )
+
+                            stripeRepository.retrieveIntent(
+                                clientSecret,
+                                requestOptions,
+                                expandFields = EXPAND_PAYMENT_METHOD,
+                                callback = createPaymentIntentCallback(
+                                    requestOptions, StripeIntentResult.Outcome.SUCCEEDED,
+                                    "", false, callback
+                                )
+                            )
+                        }
+                        else -> throw IllegalStateException("TODO figure out alipay result codes")
+                    }
+                }
+
+                override fun onError(e: Exception) {
+                    TODO("Not yet implemented")
+                }
+            }
+        ).execute()
+    }
+
+
+
+    private class AlipayAuthenticationTask(
+        private val intent: StripeIntent,
+        private val authenticationHandler: Stripe.AlipayAuthenticationHandler,
+        callback: ApiResultCallback<String>
+    ) : ApiOperation<String>(callback = callback) {
+        override suspend fun getResult(): String? {
+            val nextActionData = intent.nextActionData
+            return when {
+                nextActionData is StripeIntent.NextActionData.RedirectToUrl &&
+                    nextActionData.mobileData is StripeIntent.NextActionData.RedirectToUrl.MobileData.Alipay -> {
+                    authenticationHandler.authenticate(nextActionData.mobileData.data)["resultStatus"]
+                }
+                else -> {
+                    throw IllegalStateException("unexpected next_action data")
+                }
+            }
+        }
     }
 
     private fun createPaymentIntentCallback(
